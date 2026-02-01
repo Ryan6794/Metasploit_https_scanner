@@ -19,7 +19,7 @@ class MetasploitModule < Msf::Auxiliary
         Scans subdomains of a base domain for HTTPS support,
         HTTP redirects, and TLS version.
       },
-      'Author'         => ['Chad'],
+      'Author'         => ['Ryan Lyman'],
       'License'        => MSF_LICENSE
     ))
 
