@@ -10,7 +10,7 @@ require 'openssl'
 require 'socket'
 
 class MetasploitModule < Msf::Auxiliary
-  include Msf::Exploit::Remote::HttpClient
+  
 
   def initialize(info = {})
     super(update_info(info,
@@ -27,7 +27,7 @@ class MetasploitModule < Msf::Auxiliary
       [
         OptString.new('DOMAIN', [true, 'Base domain to scan', 'example.com']),
         OptInt.new('TIMEOUT', [true, 'Connection timeout in seconds', 5]),
-        OptPath.new('SUBDOMAIN_FILE', [false, 'Subdomain wordlist', 'data/subdomains/common.txt'])
+        OptPath.new('SUBDOMAIN_FILE', [false, 'Subdomain wordlist', File.join(Msf::Config.install_root, 'data', 'subdomains', 'common.txt')])
       ]
     )
   end
