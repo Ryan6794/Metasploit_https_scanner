@@ -26,8 +26,9 @@ class MetasploitModule < Msf::Auxiliary
     register_options(
       [
         OptString.new('DOMAIN', [true, 'Base domain to scan', 'example.com']),
-        OptPath.new('SUBDOMAIN_FILE', [false, 'File containing subdomains, one per line']),
         OptInt.new('TIMEOUT', [true, 'Connection timeout in seconds', 5])
+        OptPath.new('SUBDOMAIN_FILE', [false, 'Subdomain wordlist', 'data/subdomains/common.txt']
+)
       ]
     )
   end
