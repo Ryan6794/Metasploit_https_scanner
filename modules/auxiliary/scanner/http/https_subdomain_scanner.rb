@@ -60,11 +60,12 @@ class MetasploitModule < Msf::Auxiliary
   end
 
   def resolves?(host)
-    Socket.gethostbyname(host)
+    Addrinfo.getaddrinfo(host, nil)
     true
   rescue SocketError
     false
   end
+
 
   def get_tls_version(host, port = 443)
     ctx = OpenSSL::SSL::SSLContext.new

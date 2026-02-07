@@ -42,7 +42,7 @@ Installation
 
 Copy the module into your Metasploit auxiliary modules directory:
 
-cp http_https_subdomain_scanner.rb \
+cp https_subdomain_scanner.rb \
 ~/.msf4/modules/auxiliary/scanner/http/
 
 
@@ -53,7 +53,7 @@ msf6 > reload_all
 
 Usage
 Basic Example
-msf6 > use auxiliary/scanner/http/http_https_subdomain_scanner
+msf6 > use auxiliary/scanner/http/https_subdomain_scanner
 msf6 auxiliary(http_https_subdomain_scanner) > set DOMAIN example.com
 msf6 auxiliary(http_https_subdomain_scanner) > run
 
