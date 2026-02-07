@@ -29,7 +29,7 @@ class MetasploitModule < Msf::Auxiliary
         OptPath.new('SUBDOMAIN_FILE', [false, 'Subdomain wordlist',
           File.join(Msf::Config.install_root, 'data', 'subdomains', 'common.txt')
         ]),
-        OptPath.new('LOGFILE', [false, 'Log results to file'])
+        OptString.new('LOGFILE', [false, 'Log results to file (created if missing)'])
       ]
     )
   end
