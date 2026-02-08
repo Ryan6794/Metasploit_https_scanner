@@ -11,6 +11,8 @@ require 'socket'
 require 'fileutils'
 
 class MetasploitModule < Msf::Auxiliary
+  include Msf::Auxiliary::Report
+
   def initialize(info = {})
     super(update_info(info,
       'Name'        => 'HTTP/HTTPS Subdomain Scanner',
@@ -68,6 +70,11 @@ class MetasploitModule < Msf::Auxiliary
       log_result(logfile, result) if logfile
     end
   end
+
+  def cleanup
+    print_status('Scan interrupted, partial results saved.') if @results&.any?
+  end
+
 
   def resolves?(host)
     Addrinfo.getaddrinfo(host, nil)
