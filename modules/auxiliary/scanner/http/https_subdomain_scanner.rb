@@ -17,6 +17,7 @@ class MetasploitModule < Msf::Auxiliary
       'Description' => %q{
         Scans subdomains of a base domain for HTTPS support,
         HTTP redirects, and TLS version.
+        Results are stored as Metasploit loot with optional file logging.
       },
       'Author'      => ['Ryan Lyman'],
       'License'     => MSF_LICENSE
@@ -29,7 +30,7 @@ class MetasploitModule < Msf::Auxiliary
         OptPath.new('SUBDOMAIN_FILE', [false, 'Subdomain wordlist',
           File.join(Msf::Config.install_root, 'data', 'subdomains', 'common.txt')
         ]),
-        OptString.new('LOGFILE', [false, 'Log results to file (created if missing)'])
+        OptString.new('LOGFILE', [false, 'Optional log file (created if missing)'])
       ]
     )
   end
@@ -39,6 +40,12 @@ class MetasploitModule < Msf::Auxiliary
     sub_file    = datastore['SUBDOMAIN_FILE']
     timeout     = datastore['TIMEOUT']
     logfile     = datastore['LOGFILE']
+
+    # Touch logfile early so Ctrl+C still leaves a file
+    if logfile
+      FileUtils.mkdir_p(File.dirname(logfile)) rescue nil
+      ::File.open(logfile, 'a') {}
+    end
 
     subdomains = []
 
@@ -55,17 +62,19 @@ class MetasploitModule < Msf::Auxiliary
       next unless resolves?(full_domain)
 
       result = check_https_status(full_domain, timeout)
-      log_result(logfile, result) if logfile && result
+      next unless result
+
+      store_loot_result(result)
+      log_result(logfile, result) if logfile
     end
   end
 
   def resolves?(host)
     Addrinfo.getaddrinfo(host, nil)
     true
-  rescue SocketError
+  rescue
     false
   end
-
 
   def get_tls_version(host, port = 443)
     ctx = OpenSSL::SSL::SSLContext.new
@@ -94,7 +103,7 @@ class MetasploitModule < Msf::Auxiliary
     # HTTPS
     begin
       uri = URI.parse(https_url)
-      res = Net::HTTP.start(
+      Net::HTTP.start(
         uri.host,
         uri.port,
         use_ssl: true,
@@ -126,10 +135,8 @@ class MetasploitModule < Msf::Auxiliary
     rescue
     end
 
-    # If nothing responded at all, stay silent
     return nil unless reached_http || reached_https
 
-    # CLI output (only when something responded)
     print_status("Checking #{domain}")
 
     print_good("HTTPS supported") if https_supported
@@ -153,9 +160,30 @@ class MetasploitModule < Msf::Auxiliary
     }
   end
 
-  def log_result(logfile, result)
-    FileUtils.mkdir_p(File.dirname(logfile)) rescue nil
+  #
+  # Canonical Metasploit storage
+  #
+  def store_loot_result(result)
+    loot_data = <<~DATA
+      Domain: #{result[:domain]}
+      HTTPS Supported: #{result[:https]}
+      HTTP Redirects to HTTPS: #{result[:http_redirect]}
+      TLS Version: #{result[:tls] || 'N/A'}
+    DATA
 
+    store_loot(
+      'https.subdomain.scan',
+      'text/plain',
+      result[:domain],
+      loot_data,
+      "#{result[:domain]} HTTPS scan"
+    )
+  end
+
+  #
+  # Optional raw logfile
+  #
+  def log_result(logfile, result)
     ::File.open(logfile, 'a') do |f|
       f.puts(
         "#{result[:domain]} | " \
