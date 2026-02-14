@@ -9,6 +9,7 @@ require 'uri'
 require 'openssl'
 require 'socket'
 require 'fileutils'
+require 'thread'
 
 class MetasploitModule < Msf::Auxiliary
   include Msf::Auxiliary::Report
@@ -19,8 +20,11 @@ class MetasploitModule < Msf::Auxiliary
       'Description' => %q{
         Scans subdomains of a base domain for HTTPS support,
         HTTP redirects, and TLS version.
-        Results are stored as Metasploit loot with optional file logging.
-        Uses multithreading for faster scanning.
+
+        - Multithreaded scanning
+        - Stores results as Metasploit loot
+        - Optional custom logfile
+        - Optional failed request output for speed testing
       },
       'Author'      => ['Ryan Lyman'],
       'License'     => MSF_LICENSE
@@ -31,10 +35,16 @@ class MetasploitModule < Msf::Auxiliary
         OptString.new('DOMAIN', [true, 'Base domain to scan', 'example.com']),
         OptInt.new('TIMEOUT', [true, 'Connection timeout in seconds', 5]),
         OptInt.new('THREADS', [true, 'Number of concurrent threads', 10]),
+
         OptPath.new('SUBDOMAIN_FILE', [false, 'Subdomain wordlist',
           File.join(Msf::Config.install_root, 'data', 'subdomains', 'common.txt')
         ]),
-        OptString.new('LOGFILE', [false, 'Optional log file (created if missing)'])
+
+        OptString.new('LOGFILE', [false, 'Optional log file (created if missing)']),
+
+        OptBool.new('SHOW_FAILED',
+          [false, 'Show domains that return no response (for speed testing)', false]
+        )
       ]
     )
   end
@@ -45,17 +55,17 @@ class MetasploitModule < Msf::Auxiliary
     timeout     = datastore['TIMEOUT']
     logfile     = datastore['LOGFILE']
     threads     = datastore['THREADS']
+    show_failed = datastore['SHOW_FAILED']
 
     @mutex = Mutex.new
-    @results = []
 
-    # Ensure logfile exists early (even if interrupted)
+    # Create logfile early
     if logfile
       FileUtils.mkdir_p(File.dirname(logfile)) rescue nil
       ::File.open(logfile, 'a') {}
     end
 
-    # Build subdomain list
+    # Load subdomains
     subdomains = []
 
     if sub_file && File.exist?(sub_file)
@@ -66,36 +76,42 @@ class MetasploitModule < Msf::Auxiliary
       subdomains << ''
     end
 
-    # Create work queue
+    # Build queue
     queue = Queue.new
-
     subdomains.each do |sub|
       full_domain = sub.empty? ? base_domain : "#{sub}.#{base_domain}"
       queue << full_domain
     end
 
     print_status("Loaded #{queue.size} targets")
-    print_status("Starting scan with #{threads} threads...")
+    print_status("Starting #{threads} threads...")
 
     workers = []
 
-    threads.times do |i|
-      workers << Rex::ThreadFactory.spawn("scanner-worker-#{i}", false) do
-        loop do
-          begin
-            domain = queue.pop(true)
-          rescue ThreadError
-            break
+    threads.times do
+      workers << Thread.new do
+        while !queue.empty?
+          domain = queue.pop(true) rescue nil
+          next unless domain
+
+          # DNS resolution check
+          unless resolves?(domain)
+            if show_failed
+              @mutex.synchronize { print_status("NO DNS: #{domain}") }
+            end
+            next
           end
 
-          next unless resolves?(domain)
-
           result = check_https_status(domain, timeout)
-          next unless result
 
-          # Thread-safe storage + logging
+          unless result
+            if show_failed
+              @mutex.synchronize { print_status("NO RESPONSE: #{domain}") }
+            end
+            next
+          end
+
           @mutex.synchronize do
-            @results << result
             store_loot_result(result)
             log_result(logfile, result) if logfile
           end
@@ -105,11 +121,11 @@ class MetasploitModule < Msf::Auxiliary
 
     workers.each(&:join)
 
-    print_good("Scan completed — #{@results.length} results saved.")
+    print_good("Scan completed.")
   end
 
   def cleanup
-    print_status("Scan interrupted — #{@results&.length || 0} partial results saved.")
+    print_status('Scan interrupted.')
   end
 
   def resolves?(host)
@@ -143,7 +159,7 @@ class MetasploitModule < Msf::Auxiliary
     http_redirects_to_https = false
     tls_version = nil
 
-    # HTTPS check
+    # HTTPS
     begin
       uri = URI.parse(https_url)
       Net::HTTP.start(
@@ -160,7 +176,7 @@ class MetasploitModule < Msf::Auxiliary
     rescue
     end
 
-    # HTTP check
+    # HTTP
     begin
       uri = URI.parse(http_url)
       res = Net::HTTP.start(
@@ -180,19 +196,21 @@ class MetasploitModule < Msf::Auxiliary
 
     return nil unless reached_http || reached_https
 
-    print_status("Checking #{domain}")
-    print_good("HTTPS supported") if https_supported
-    print_error("HTTPS not supported") unless https_supported
+    @mutex.synchronize do
+      print_status("Checking #{domain}")
+      print_good("HTTPS supported") if https_supported
+      print_error("HTTPS not supported") unless https_supported
 
-    if reached_http
-      if http_redirects_to_https
-        print_good("HTTP redirects to HTTPS")
-      else
-        print_status("HTTP does not redirect to HTTPS")
+      if reached_http
+        if http_redirects_to_https
+          print_good("HTTP redirects to HTTPS")
+        else
+          print_status("HTTP does not redirect to HTTPS")
+        end
       end
-    end
 
-    print_good("TLS version: #{tls_version}") if tls_version
+      print_good("TLS version: #{tls_version}") if tls_version
+    end
 
     {
       domain: domain,
@@ -225,4 +243,14 @@ class MetasploitModule < Msf::Auxiliary
   #
   # Optional raw logfile
   #
-  def log_result(logfile, result_
+  def log_result(logfile, result)
+    ::File.open(logfile, 'a') do |f|
+      f.puts(
+        "#{result[:domain]} | " \
+        "HTTPS=#{result[:https]} | " \
+        "HTTP->HTTPS=#{result[:http_redirect]} | " \
+        "TLS=#{result[:tls] || 'N/A'}"
+      )
+    end
+  end
+end
