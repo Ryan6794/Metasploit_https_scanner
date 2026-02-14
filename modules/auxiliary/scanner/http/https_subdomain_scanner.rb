@@ -54,18 +54,24 @@ class MetasploitModule < Msf::Auxiliary
     sub_file    = datastore['SUBDOMAIN_FILE']
     timeout     = datastore['TIMEOUT']
     logfile     = datastore['LOGFILE']
-    threads     = datastore['THREADS']
+    threads     = datastore['THREADS'] || 10
     show_failed = datastore['SHOW_FAILED']
 
     @mutex = Mutex.new
+    @stop_requested = false
 
-    # Create logfile early
+    # Handle Ctrl+C cleanly
+    trap('INT') do
+      print_warning('Stopping scan... please wait.')
+      @stop_requested = true
+    end
+
+    # Touch logfile early so Ctrl+C still leaves a file
     if logfile
       FileUtils.mkdir_p(File.dirname(logfile)) rescue nil
       ::File.open(logfile, 'a') {}
     end
 
-    # Load subdomains
     subdomains = []
 
     if sub_file && File.exist?(sub_file)
@@ -76,25 +82,21 @@ class MetasploitModule < Msf::Auxiliary
       subdomains << ''
     end
 
-    # Build queue
     queue = Queue.new
     subdomains.each do |sub|
-      full_domain = sub.empty? ? base_domain : "#{sub}.#{base_domain}"
-      queue << full_domain
+      domain = sub.empty? ? base_domain : "#{sub}.#{base_domain}"
+      queue << domain
     end
-
-    print_status("Loaded #{queue.size} targets")
-    print_status("Starting #{threads} threads...")
 
     workers = []
 
     threads.times do
       workers << Thread.new do
-        while !queue.empty?
+        while !queue.empty? && !@stop_requested
           domain = queue.pop(true) rescue nil
           next unless domain
+          break if @stop_requested
 
-          # DNS resolution check
           unless resolves?(domain)
             if show_failed
               @mutex.synchronize { print_status("NO DNS: #{domain}") }
@@ -120,13 +122,14 @@ class MetasploitModule < Msf::Auxiliary
     end
 
     workers.each(&:join)
-
-    print_good("Scan completed.")
+    print_status('Scan completed.')
   end
+
 
   def cleanup
-    print_status('Scan interrupted.')
+    print_warning('Scan interrupted by user.') if @stop_requested
   end
+
 
   def resolves?(host)
     Addrinfo.getaddrinfo(host, nil)
