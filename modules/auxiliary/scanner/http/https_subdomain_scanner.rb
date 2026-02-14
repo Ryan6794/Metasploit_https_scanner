@@ -15,11 +15,12 @@ class MetasploitModule < Msf::Auxiliary
 
   def initialize(info = {})
     super(update_info(info,
-      'Name'        => 'HTTP/HTTPS Subdomain Scanner',
+      'Name'        => 'HTTP/HTTPS Subdomain Scanner (Multithreaded)',
       'Description' => %q{
         Scans subdomains of a base domain for HTTPS support,
         HTTP redirects, and TLS version.
         Results are stored as Metasploit loot with optional file logging.
+        Uses multithreading for faster scanning.
       },
       'Author'      => ['Ryan Lyman'],
       'License'     => MSF_LICENSE
@@ -29,6 +30,7 @@ class MetasploitModule < Msf::Auxiliary
       [
         OptString.new('DOMAIN', [true, 'Base domain to scan', 'example.com']),
         OptInt.new('TIMEOUT', [true, 'Connection timeout in seconds', 5]),
+        OptInt.new('THREADS', [true, 'Number of concurrent threads', 10]),
         OptPath.new('SUBDOMAIN_FILE', [false, 'Subdomain wordlist',
           File.join(Msf::Config.install_root, 'data', 'subdomains', 'common.txt')
         ]),
@@ -42,13 +44,18 @@ class MetasploitModule < Msf::Auxiliary
     sub_file    = datastore['SUBDOMAIN_FILE']
     timeout     = datastore['TIMEOUT']
     logfile     = datastore['LOGFILE']
+    threads     = datastore['THREADS']
 
-    # Touch logfile early so Ctrl+C still leaves a file
+    @mutex = Mutex.new
+    @results = []
+
+    # Ensure logfile exists early (even if interrupted)
     if logfile
       FileUtils.mkdir_p(File.dirname(logfile)) rescue nil
       ::File.open(logfile, 'a') {}
     end
 
+    # Build subdomain list
     subdomains = []
 
     if sub_file && File.exist?(sub_file)
@@ -59,22 +66,51 @@ class MetasploitModule < Msf::Auxiliary
       subdomains << ''
     end
 
+    # Create work queue
+    queue = Queue.new
+
     subdomains.each do |sub|
       full_domain = sub.empty? ? base_domain : "#{sub}.#{base_domain}"
-      next unless resolves?(full_domain)
-
-      result = check_https_status(full_domain, timeout)
-      next unless result
-
-      store_loot_result(result)
-      log_result(logfile, result) if logfile
+      queue << full_domain
     end
+
+    print_status("Loaded #{queue.size} targets")
+    print_status("Starting scan with #{threads} threads...")
+
+    workers = []
+
+    threads.times do |i|
+      workers << Rex::ThreadFactory.spawn("scanner-worker-#{i}", false) do
+        loop do
+          begin
+            domain = queue.pop(true)
+          rescue ThreadError
+            break
+          end
+
+          next unless resolves?(domain)
+
+          result = check_https_status(domain, timeout)
+          next unless result
+
+          # Thread-safe storage + logging
+          @mutex.synchronize do
+            @results << result
+            store_loot_result(result)
+            log_result(logfile, result) if logfile
+          end
+        end
+      end
+    end
+
+    workers.each(&:join)
+
+    print_good("Scan completed — #{@results.length} results saved.")
   end
 
   def cleanup
-    print_status('Scan interrupted, partial results saved.') if @results&.any?
+    print_status("Scan interrupted — #{@results&.length || 0} partial results saved.")
   end
-
 
   def resolves?(host)
     Addrinfo.getaddrinfo(host, nil)
@@ -107,7 +143,7 @@ class MetasploitModule < Msf::Auxiliary
     http_redirects_to_https = false
     tls_version = nil
 
-    # HTTPS
+    # HTTPS check
     begin
       uri = URI.parse(https_url)
       Net::HTTP.start(
@@ -124,7 +160,7 @@ class MetasploitModule < Msf::Auxiliary
     rescue
     end
 
-    # HTTP
+    # HTTP check
     begin
       uri = URI.parse(http_url)
       res = Net::HTTP.start(
@@ -145,7 +181,6 @@ class MetasploitModule < Msf::Auxiliary
     return nil unless reached_http || reached_https
 
     print_status("Checking #{domain}")
-
     print_good("HTTPS supported") if https_supported
     print_error("HTTPS not supported") unless https_supported
 
@@ -168,7 +203,7 @@ class MetasploitModule < Msf::Auxiliary
   end
 
   #
-  # Canonical Metasploit storage
+  # Store results in Metasploit loot
   #
   def store_loot_result(result)
     loot_data = <<~DATA
@@ -190,14 +225,4 @@ class MetasploitModule < Msf::Auxiliary
   #
   # Optional raw logfile
   #
-  def log_result(logfile, result)
-    ::File.open(logfile, 'a') do |f|
-      f.puts(
-        "#{result[:domain]} | " \
-        "HTTPS=#{result[:https]} | " \
-        "HTTP->HTTPS=#{result[:http_redirect]} | " \
-        "TLS=#{result[:tls] || 'N/A'}"
-      )
-    end
-  end
-end
+  def log_result(logfile, result_
