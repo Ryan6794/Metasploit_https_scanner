@@ -1,7 +1,6 @@
-##
 # This module requires Metasploit framework
 # Tested with Metasploit 6+
-##
+
 
 require 'msf/core'
 require 'net/http'
@@ -184,18 +183,31 @@ class MetasploitModule < Msf::Auxiliary
   end
 
   def get_tls_version(host, port)
-    ctx = OpenSSL::SSL::SSLContext.new
-    tcp = TCPSocket.new(host, port)
-    ssl = OpenSSL::SSL::SSLSocket.new(tcp, ctx)
-    ssl.hostname = host
-    ssl.connect
-    version = ssl.ssl_version
-    ssl.close
-    tcp.close
-    version
-  rescue
-    nil
+    tcp = nil
+    ssl = nil
+
+    begin
+      ctx = OpenSSL::SSL::SSLContext.new
+
+      # Set connection timeout
+      tcp = Socket.tcp(host, port, connect_timeout: 5)
+
+      ssl = OpenSSL::SSL::SSLSocket.new(tcp, ctx)
+      ssl.hostname = host # SNI support
+      ssl.sync_close = true
+
+      ssl.connect
+      ssl.ssl_version
+
+    rescue
+      nil
+
+    ensure
+      ssl&.close
+      tcp&.close
+    end
   end
+
 
   def check_https_status(domain, timeout, retry_count, http_port, https_port)
     http_url  = "http://#{domain}:#{http_port}"
