@@ -256,32 +256,41 @@ class MetasploitModule < Msf::Auxiliary
     }
   end
 
-  #
-  # Store results in Metasploit loot (with timestamped filename)
-  #
   def store_loot_result(result)
-    # Create timestamp
+    # Clean timestamp (sortable + readable)
     timestamp = Time.now.strftime('%Y-%m-%d_%H-%M-%S')
 
+    # Sanitize domain for filesystem safety
+    safe_domain = result[:domain].gsub(/[^a-zA-Z0-9\.\-]/, '_')
+
+    # Pretty formatted output content
     loot_data = <<~DATA
-      Scan Time: #{timestamp}
+      ===== HTTPS Scan Result =====
+      Scan Time: #{Time.now}
       Domain: #{result[:domain]}
+
+      Security Details
+      ----------------
       HTTPS Supported: #{result[:https]}
       HTTP Redirects to HTTPS: #{result[:http_redirect]}
       TLS Version: #{result[:tls] || 'N/A'}
     DATA
 
+    # Clean filename format
+    filename = "https_scan_#{safe_domain}_#{timestamp}.txt"
+
     store_loot(
       'https.subdomain.scan',
       'text/plain',
-      result[:domain],
+      result[:domain],   # host
       loot_data,
-      "#{result[:domain]}_https_scan_#{timestamp}.txt",
-      "HTTPS Scan #{timestamp}"
+      filename,
+      "HTTPS Scan #{safe_domain}"
     )
   end
 
-  
+
+
   #
   # Optional raw logfile (auto timestamped filename + entry time)
   #
