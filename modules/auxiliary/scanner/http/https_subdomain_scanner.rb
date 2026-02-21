@@ -82,11 +82,17 @@ class MetasploitModule < Msf::Auxiliary
       subdomains << ''
     end
 
+    # Build queue
     queue = Queue.new
     subdomains.each do |sub|
       domain = sub.empty? ? base_domain : "#{sub}.#{base_domain}"
       queue << domain
     end
+
+    # Progress tracking
+    @total = queue.size
+    @processed = 0
+    update_progress_bar
 
     workers = []
 
@@ -101,6 +107,7 @@ class MetasploitModule < Msf::Auxiliary
             if show_failed
               @mutex.synchronize { print_status("NO DNS: #{domain}") }
             end
+            increment_progress
             next
           end
 
@@ -110,6 +117,7 @@ class MetasploitModule < Msf::Auxiliary
             if show_failed
               @mutex.synchronize { print_status("NO RESPONSE: #{domain}") }
             end
+            increment_progress
             next
           end
 
@@ -117,13 +125,38 @@ class MetasploitModule < Msf::Auxiliary
             store_loot_result(result)
             log_result(logfile, result) if logfile
           end
+
+          increment_progress
         end
       end
     end
 
     workers.each(&:join)
+
+    print_line("") # move cursor to new line after bar
     print_status('Scan completed.')
   end
+
+
+  def increment_progress
+    @mutex.synchronize do
+      @processed += 1
+      update_progress_bar
+    end
+  end
+
+  def update_progress_bar
+    return if @total.nil? || @total == 0
+
+    percent = (@processed.to_f / @total * 100).round(1)
+    bar_length = 30
+    filled = (@processed.to_f / @total * bar_length).round
+
+    bar = "[" + "#" * filled + "-" * (bar_length - filled) + "]"
+
+    print("\r#{bar} #{percent}% (#{@processed}/#{@total})")
+  end
+
 
 
   def cleanup
@@ -224,10 +257,14 @@ class MetasploitModule < Msf::Auxiliary
   end
 
   #
-  # Store results in Metasploit loot
+  # Store results in Metasploit loot (with timestamped filename)
   #
   def store_loot_result(result)
+    # Create timestamp
+    timestamp = Time.now.strftime('%Y-%m-%d_%H-%M-%S')
+
     loot_data = <<~DATA
+      Scan Time: #{timestamp}
       Domain: #{result[:domain]}
       HTTPS Supported: #{result[:https]}
       HTTP Redirects to HTTPS: #{result[:http_redirect]}
@@ -239,17 +276,30 @@ class MetasploitModule < Msf::Auxiliary
       'text/plain',
       result[:domain],
       loot_data,
-      "#{result[:domain]} HTTPS scan"
+      "#{result[:domain]}_https_scan_#{timestamp}.txt",
+      "HTTPS Scan #{timestamp}"
     )
   end
 
+  
   #
-  # Optional raw logfile
+  # Optional raw logfile (auto timestamped filename + entry time)
   #
   def log_result(logfile, result)
-    ::File.open(logfile, 'a') do |f|
+    # Create timestamp
+    timestamp = Time.now.strftime('%Y-%m-%d_%H-%M-%S')
+
+    # Add timestamp to logfile name automatically
+    base = ::File.basename(logfile, '.*')
+    ext  = ::File.extname(logfile)
+    logfile_with_time = ::File.join(
+      ::File.dirname(logfile),
+      "#{base}_#{timestamp}#{ext}"
+    )
+
+    ::File.open(logfile_with_time, 'a') do |f|
       f.puts(
-        "#{result[:domain]} | " \
+        "[#{timestamp}] #{result[:domain]} | " \
         "HTTPS=#{result[:https]} | " \
         "HTTP->HTTPS=#{result[:http_redirect]} | " \
         "TLS=#{result[:tls] || 'N/A'}"
