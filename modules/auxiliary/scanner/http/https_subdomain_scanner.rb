@@ -30,32 +30,43 @@ class MetasploitModule < Msf::Auxiliary
       'License'     => MSF_LICENSE
     ))
 
-    register_options(
-      [
-        OptString.new('DOMAIN', [true, 'Base domain to scan', 'example.com']),
-        OptInt.new('TIMEOUT', [true, 'Connection timeout in seconds', 5]),
-        OptInt.new('THREADS', [true, 'Number of concurrent threads', 10]),
+  register_options(
+    [
+      OptString.new('DOMAIN', [true, 'Base domain to scan', 'example.com']),
+      OptInt.new('TIMEOUT', [true, 'Connection timeout in seconds', 5]),
+      OptInt.new('THREADS', [true, 'Number of concurrent threads', 10]),
 
-        OptPath.new('SUBDOMAIN_FILE', [false, 'Subdomain wordlist',
-          File.join(Msf::Config.install_root, 'data', 'subdomains', 'common.txt')
-        ]),
+      # NEW OPTIONS
+      OptInt.new('RETRY_COUNT', [true, 'Number of retries per request', 1]),
+      OptInt.new('HTTP_PORT', [true, 'HTTP port', 80]),
+      OptInt.new('HTTPS_PORT', [true, 'HTTPS port', 443]),
 
-        OptString.new('LOGFILE', [false, 'Optional log file (created if missing)']),
+      OptPath.new('SUBDOMAIN_FILE', [false, 'Subdomain wordlist',
+        File.join(Msf::Config.install_root, 'data', 'subdomains', 'common.txt')
+      ]),
 
-        OptBool.new('SHOW_FAILED',
-          [false, 'Show domains that return no response (for speed testing)', false]
-        )
-      ]
-    )
-  end
+      OptString.new('LOGFILE', [false, 'Optional log file (created if missing)']),
+
+      OptBool.new('SHOW_FAILED',
+        [false, 'Show domains that return no response (for speed testing)', false]
+      )
+    ]
+  )
+
 
   def run
-    base_domain = datastore['DOMAIN']
-    sub_file    = datastore['SUBDOMAIN_FILE']
-    timeout     = datastore['TIMEOUT']
-    logfile     = datastore['LOGFILE']
-    threads     = datastore['THREADS'] || 10
-    show_failed = datastore['SHOW_FAILED']
+base_domain = datastore['DOMAIN']
+sub_file    = datastore['SUBDOMAIN_FILE']
+timeout     = datastore['TIMEOUT']
+logfile     = datastore['LOGFILE']
+threads     = datastore['THREADS'] || 10
+show_failed = datastore['SHOW_FAILED']
+
+# NEW VALUES
+retry_count = datastore['RETRY_COUNT'] || 1
+http_port   = datastore['HTTP_PORT'] || 80
+https_port  = datastore['HTTPS_PORT'] || 443
+
 
     @mutex = Mutex.new
     @stop_requested = false
@@ -111,7 +122,7 @@ class MetasploitModule < Msf::Auxiliary
             next
           end
 
-          result = check_https_status(domain, timeout)
+          result = check_https_status(domain, timeout, retry_count, http_port, https_port)
 
           unless result
             if show_failed
@@ -171,7 +182,7 @@ class MetasploitModule < Msf::Auxiliary
     false
   end
 
-  def get_tls_version(host, port = 443)
+  def get_tls_version(host, port)
     ctx = OpenSSL::SSL::SSLContext.new
     tcp = TCPSocket.new(host, port)
     ssl = OpenSSL::SSL::SSLSocket.new(tcp, ctx)
@@ -185,9 +196,9 @@ class MetasploitModule < Msf::Auxiliary
     nil
   end
 
-  def check_https_status(domain, timeout)
-    http_url  = "http://#{domain}"
-    https_url = "https://#{domain}"
+  def check_https_status(domain, timeout, retry_count, http_port, https_port)
+    http_url  = "http://#{domain}:#{http_port}"
+    https_url = "https://#{domain}:#{https_port}"
 
     reached_https = false
     reached_http  = false
@@ -195,46 +206,60 @@ class MetasploitModule < Msf::Auxiliary
     http_redirects_to_https = false
     tls_version = nil
 
-    # HTTPS
-    begin
-      uri = URI.parse(https_url)
-      Net::HTTP.start(
-        uri.host,
-        uri.port,
-        use_ssl: true,
-        verify_mode: OpenSSL::SSL::VERIFY_NONE,
-        read_timeout: timeout
-      ) { |http| http.get('/') }
+    # HTTPS WITH RETRIES
+    retry_count.times do
+      break if reached_https
 
-      reached_https = true
-      https_supported = true
-      tls_version = get_tls_version(domain)
-    rescue
+      begin
+        uri = URI.parse(https_url)
+
+        Net::HTTP.start(
+          uri.host,
+          uri.port,
+          use_ssl: true,
+          verify_mode: OpenSSL::SSL::VERIFY_NONE,
+          read_timeout: timeout
+        ) { |http| http.get('/') }
+
+        reached_https = true
+        https_supported = true
+        tls_version = get_tls_version(domain, https_port)
+
+      rescue
+        sleep(0.2) # small delay between retries
+      end
     end
 
-    # HTTP
-    begin
-      uri = URI.parse(http_url)
-      res = Net::HTTP.start(
-        uri.host,
-        uri.port,
-        read_timeout: timeout
-      ) { |http| http.get('/') }
+    # HTTP WITH RETRIES
+    retry_count.times do
+      break if reached_http
 
-      reached_http = true
+      begin
+        uri = URI.parse(http_url)
 
-      if res.is_a?(Net::HTTPRedirection)
-        location = res['location']
-        http_redirects_to_https = location&.start_with?('https://')
+        res = Net::HTTP.start(
+          uri.host,
+          uri.port,
+          read_timeout: timeout
+        ) { |http| http.get('/') }
+
+        reached_http = true
+
+        if res.is_a?(Net::HTTPRedirection)
+          location = res['location']
+          http_redirects_to_https = location&.start_with?('https://')
+        end
+
+      rescue
+        sleep(0.2)
       end
-    rescue
     end
 
     return nil unless reached_http || reached_https
 
     @mutex.synchronize do
       print_status("Checking #{domain}")
-      print_good("HTTPS supported") if https_supported
+      print_good("HTTPS supported (port #{https_port})") if https_supported
       print_error("HTTPS not supported") unless https_supported
 
       if reached_http
@@ -255,6 +280,7 @@ class MetasploitModule < Msf::Auxiliary
       tls: tls_version
     }
   end
+
 
   def store_loot_result(result)
     # Clean timestamp (sortable + readable)
