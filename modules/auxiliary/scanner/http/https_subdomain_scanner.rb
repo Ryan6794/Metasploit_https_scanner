@@ -28,7 +28,8 @@ class MetasploitModule < Msf::Auxiliary
       },
       'Author'      => ['Ryan Lyman'],
       'License'     => MSF_LICENSE
-    ))
+    )
+  )
 
   register_options(
     [
@@ -52,20 +53,21 @@ class MetasploitModule < Msf::Auxiliary
       )
     ]
   )
+  
 
 
   def run
-base_domain = datastore['DOMAIN']
-sub_file    = datastore['SUBDOMAIN_FILE']
-timeout     = datastore['TIMEOUT']
-logfile     = datastore['LOGFILE']
-threads     = datastore['THREADS'] || 10
-show_failed = datastore['SHOW_FAILED']
+    base_domain = datastore['DOMAIN']
+    sub_file    = datastore['SUBDOMAIN_FILE']
+    timeout     = datastore['TIMEOUT']
+    logfile     = datastore['LOGFILE']
+    threads     = datastore['THREADS'] || 10
+    show_failed = datastore['SHOW_FAILED']
 
-# NEW VALUES
-retry_count = datastore['RETRY_COUNT'] || 1
-http_port   = datastore['HTTP_PORT'] || 80
-https_port  = datastore['HTTPS_PORT'] || 443
+    # NEW VALUES
+    retry_count = datastore['RETRY_COUNT'] || 1
+    http_port   = datastore['HTTP_PORT'] || 80
+    https_port  = datastore['HTTPS_PORT'] || 443
 
 
     @mutex = Mutex.new
