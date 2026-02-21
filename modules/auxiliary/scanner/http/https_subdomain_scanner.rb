@@ -28,32 +28,31 @@ class MetasploitModule < Msf::Auxiliary
       },
       'Author'      => ['Ryan Lyman'],
       'License'     => MSF_LICENSE
+    ))
+
+    register_options(
+      [
+        OptString.new('DOMAIN', [true, 'Base domain to scan', 'example.com']),
+        OptInt.new('TIMEOUT', [true, 'Connection timeout in seconds', 5]),
+        OptInt.new('THREADS', [true, 'Number of concurrent threads', 10]),
+
+        # NEW OPTIONS
+        OptInt.new('RETRY_COUNT', [true, 'Number of retries per request', 1]),
+        OptInt.new('HTTP_PORT', [true, 'HTTP port', 80]),
+        OptInt.new('HTTPS_PORT', [true, 'HTTPS port', 443]),
+
+        OptPath.new('SUBDOMAIN_FILE', [false, 'Subdomain wordlist',
+          File.join(Msf::Config.install_root, 'data', 'subdomains', 'common.txt')
+        ]),
+
+        OptString.new('LOGFILE', [false, 'Optional log file (created if missing)']),
+
+        OptBool.new('SHOW_FAILED',
+          [false, 'Show domains that return no response (for speed testing)', false]
+        )
+      ]
     )
-  )
-
-  register_options(
-    [
-      OptString.new('DOMAIN', [true, 'Base domain to scan', 'example.com']),
-      OptInt.new('TIMEOUT', [true, 'Connection timeout in seconds', 5]),
-      OptInt.new('THREADS', [true, 'Number of concurrent threads', 10]),
-
-      # NEW OPTIONS
-      OptInt.new('RETRY_COUNT', [true, 'Number of retries per request', 1]),
-      OptInt.new('HTTP_PORT', [true, 'HTTP port', 80]),
-      OptInt.new('HTTPS_PORT', [true, 'HTTPS port', 443]),
-
-      OptPath.new('SUBDOMAIN_FILE', [false, 'Subdomain wordlist',
-        File.join(Msf::Config.install_root, 'data', 'subdomains', 'common.txt')
-      ]),
-
-      OptString.new('LOGFILE', [false, 'Optional log file (created if missing)']),
-
-      OptBool.new('SHOW_FAILED',
-        [false, 'Show domains that return no response (for speed testing)', false]
-      )
-    ]
-  )
-  
+  end
 
 
   def run
