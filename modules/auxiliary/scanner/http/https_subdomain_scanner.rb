@@ -1,6 +1,7 @@
+#
 # This module requires Metasploit framework
 # Tested with Metasploit 6+
-
+#
 
 require 'msf/core'
 require 'net/http'
@@ -18,12 +19,13 @@ class MetasploitModule < Msf::Auxiliary
       'Name'        => 'HTTP/HTTPS Subdomain Scanner (Multithreaded)',
       'Description' => %q{
         Scans subdomains of a base domain for HTTPS support,
-        HTTP redirects, and TLS version.
+        HTTP redirects, TLS version, and HTTP response status codes.
 
         - Multithreaded scanning
         - Stores results as Metasploit loot
         - Optional custom logfile
         - Optional failed request output for speed testing
+        - HTTP/HTTPS response status detection
       },
       'Author'      => ['Ryan Lyman'],
       'License'     => MSF_LICENSE
@@ -34,8 +36,6 @@ class MetasploitModule < Msf::Auxiliary
         OptString.new('DOMAIN', [true, 'Base domain to scan', 'example.com']),
         OptInt.new('TIMEOUT', [true, 'Connection timeout in seconds', 5]),
         OptInt.new('THREADS', [true, 'Number of concurrent threads', 10]),
-
-        # NEW OPTIONS
         OptInt.new('RETRY_COUNT', [true, 'Number of retries per request', 1]),
         OptInt.new('HTTP_PORT', [true, 'HTTP port', 80]),
         OptInt.new('HTTPS_PORT', [true, 'HTTPS port', 443]),
@@ -53,7 +53,6 @@ class MetasploitModule < Msf::Auxiliary
     )
   end
 
-
   def run
     base_domain = datastore['DOMAIN']
     sub_file    = datastore['SUBDOMAIN_FILE']
@@ -62,22 +61,18 @@ class MetasploitModule < Msf::Auxiliary
     threads     = datastore['THREADS'] || 10
     show_failed = datastore['SHOW_FAILED']
 
-    # NEW VALUES
     retry_count = datastore['RETRY_COUNT'] || 1
     http_port   = datastore['HTTP_PORT'] || 80
     https_port  = datastore['HTTPS_PORT'] || 443
 
-
     @mutex = Mutex.new
     @stop_requested = false
 
-    # Handle Ctrl+C cleanly
     trap('INT') do
       print_warning('Stopping scan... please wait.')
       @stop_requested = true
     end
 
-    # Touch logfile early so Ctrl+C still leaves a file
     if logfile
       FileUtils.mkdir_p(File.dirname(logfile)) rescue nil
       ::File.open(logfile, 'a') {}
@@ -93,14 +88,12 @@ class MetasploitModule < Msf::Auxiliary
       subdomains << ''
     end
 
-    # Build queue
     queue = Queue.new
     subdomains.each do |sub|
       domain = sub.empty? ? base_domain : "#{sub}.#{base_domain}"
       queue << domain
     end
 
-    # Progress tracking
     @total = queue.size
     @processed = 0
     update_progress_bar
@@ -144,10 +137,9 @@ class MetasploitModule < Msf::Auxiliary
 
     workers.each(&:join)
 
-    print_line("") # move cursor to new line after bar
+    print_line("")
     print_status('Scan completed.')
   end
-
 
   def increment_progress
     @mutex.synchronize do
@@ -162,18 +154,14 @@ class MetasploitModule < Msf::Auxiliary
     percent = (@processed.to_f / @total * 100).round(1)
     bar_length = 30
     filled = (@processed.to_f / @total * bar_length).round
-
     bar = "[" + "#" * filled + "-" * (bar_length - filled) + "]"
 
     print("\r#{bar} #{percent}% (#{@processed}/#{@total})")
   end
 
-
-
   def cleanup
     print_warning('Scan interrupted by user.') if @stop_requested
   end
-
 
   def resolves?(host)
     Addrinfo.getaddrinfo(host, nil)
@@ -188,26 +176,21 @@ class MetasploitModule < Msf::Auxiliary
 
     begin
       ctx = OpenSSL::SSL::SSLContext.new
-
-      # Set connection timeout
       tcp = Socket.tcp(host, port, connect_timeout: 5)
 
       ssl = OpenSSL::SSL::SSLSocket.new(tcp, ctx)
-      ssl.hostname = host # SNI support
+      ssl.hostname = host
       ssl.sync_close = true
 
       ssl.connect
       ssl.ssl_version
-
     rescue
       nil
-
     ensure
       ssl&.close
       tcp&.close
     end
   end
-
 
   def check_https_status(domain, timeout, retry_count, http_port, https_port)
     http_url  = "http://#{domain}:#{http_port}"
@@ -219,14 +202,17 @@ class MetasploitModule < Msf::Auxiliary
     http_redirects_to_https = false
     tls_version = nil
 
-    # HTTPS WITH RETRIES
+    http_status = nil
+    https_status = nil
+
+    # HTTPS CHECK
     retry_count.times do
       break if reached_https
 
       begin
         uri = URI.parse(https_url)
 
-        Net::HTTP.start(
+        res = Net::HTTP.start(
           uri.host,
           uri.port,
           use_ssl: true,
@@ -236,14 +222,15 @@ class MetasploitModule < Msf::Auxiliary
 
         reached_https = true
         https_supported = true
+        https_status = res.code
         tls_version = get_tls_version(domain, https_port)
 
       rescue
-        sleep(0.2) # small delay between retries
+        sleep(0.2)
       end
     end
 
-    # HTTP WITH RETRIES
+    # HTTP CHECK
     retry_count.times do
       break if reached_http
 
@@ -257,6 +244,7 @@ class MetasploitModule < Msf::Auxiliary
         ) { |http| http.get('/') }
 
         reached_http = true
+        http_status = res.code
 
         if res.is_a?(Net::HTTPRedirection)
           location = res['location']
@@ -272,8 +260,15 @@ class MetasploitModule < Msf::Auxiliary
 
     @mutex.synchronize do
       print_status("Checking #{domain}")
-      print_good("HTTPS supported (port #{https_port})") if https_supported
-      print_error("HTTPS not supported") unless https_supported
+
+      if https_supported
+        print_good("HTTPS supported (#{https_status})")
+      else
+        print_error("HTTPS not supported")
+      end
+
+      print_status("HTTP status: #{http_status}") if http_status
+      print_status("HTTPS status: #{https_status}") if https_status
 
       if reached_http
         if http_redirects_to_https
@@ -290,19 +285,16 @@ class MetasploitModule < Msf::Auxiliary
       domain: domain,
       https: https_supported,
       http_redirect: http_redirects_to_https,
-      tls: tls_version
+      tls: tls_version,
+      http_status: http_status,
+      https_status: https_status
     }
   end
 
-
   def store_loot_result(result)
-    # Clean timestamp (sortable + readable)
     timestamp = Time.now.strftime('%Y-%m-%d_%H-%M-%S')
-
-    # Sanitize domain for filesystem safety
     safe_domain = result[:domain].gsub(/[^a-zA-Z0-9\.\-]/, '_')
 
-    # Pretty formatted output content
     loot_data = <<~DATA
       ===== HTTPS Scan Result =====
       Scan Time: #{Time.now}
@@ -311,35 +303,30 @@ class MetasploitModule < Msf::Auxiliary
       Security Details
       ----------------
       HTTPS Supported: #{result[:https]}
+      HTTP Status Code: #{result[:http_status] || 'N/A'}
+      HTTPS Status Code: #{result[:https_status] || 'N/A'}
       HTTP Redirects to HTTPS: #{result[:http_redirect]}
       TLS Version: #{result[:tls] || 'N/A'}
     DATA
 
-    # Clean filename format
     filename = "https_scan_#{safe_domain}_#{timestamp}.txt"
 
     store_loot(
       'https.subdomain.scan',
       'text/plain',
-      result[:domain],   # host
+      result[:domain],
       loot_data,
       filename,
       "HTTPS Scan #{safe_domain}"
     )
   end
 
-
-
-  #
-  # Optional raw logfile (auto timestamped filename + entry time)
-  #
   def log_result(logfile, result)
-    # Create timestamp
     timestamp = Time.now.strftime('%Y-%m-%d_%H-%M-%S')
 
-    # Add timestamp to logfile name automatically
     base = ::File.basename(logfile, '.*')
     ext  = ::File.extname(logfile)
+
     logfile_with_time = ::File.join(
       ::File.dirname(logfile),
       "#{base}_#{timestamp}#{ext}"
@@ -348,7 +335,9 @@ class MetasploitModule < Msf::Auxiliary
     ::File.open(logfile_with_time, 'a') do |f|
       f.puts(
         "[#{timestamp}] #{result[:domain]} | " \
-        "HTTPS=#{result[:https]} | " \
+        "HTTP=#{result[:http_status] || 'N/A'} | " \
+        "HTTPS=#{result[:https_status] || 'N/A'} | " \
+        "HTTPS_SUPPORTED=#{result[:https]} | " \
         "HTTP->HTTPS=#{result[:http_redirect]} | " \
         "TLS=#{result[:tls] || 'N/A'}"
       )
