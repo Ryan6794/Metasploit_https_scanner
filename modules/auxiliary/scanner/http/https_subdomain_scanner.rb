@@ -10,6 +10,8 @@ require 'openssl'
 require 'socket'
 require 'fileutils'
 require 'thread'
+require 'json'
+require 'csv'
 
 class MetasploitModule < Msf::Auxiliary
   include Msf::Auxiliary::Report
@@ -40,6 +42,11 @@ class MetasploitModule < Msf::Auxiliary
         OptInt.new('HTTP_PORT', [true, 'HTTP port', 80]),
         OptInt.new('HTTPS_PORT', [true, 'HTTPS port', 443]),
 
+        OptString.new('USER_AGENT', [true, 'Custom HTTP User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36']),
+        OptBool.new('EXPORT_JSON', [false, 'Export results to JSON', false]),
+        OptBool.new('EXPORT_CSV', [false, 'Export results to CSV', false]),
+        OptPath.new('EXPORT_PATH', [false, 'Directory to store exported scan results', './msf_scans']),
+
         OptPath.new('SUBDOMAIN_FILE', [false, 'Subdomain wordlist',
           File.join(Msf::Config.install_root, 'data', 'subdomains', 'common.txt')
         ]),
@@ -67,6 +74,8 @@ class MetasploitModule < Msf::Auxiliary
 
     @mutex = Mutex.new
     @stop_requested = false
+
+    @results = []
 
     trap('INT') do
       print_warning('Stopping scan... please wait.')
@@ -128,6 +137,7 @@ class MetasploitModule < Msf::Auxiliary
           @mutex.synchronize do
             store_loot_result(result)
             log_result(logfile, result) if logfile
+            @results << result
           end
 
           increment_progress
@@ -137,8 +147,10 @@ class MetasploitModule < Msf::Auxiliary
 
     workers.each(&:join)
 
+    export_results
     print_line("")
     print_status('Scan completed.')
+    
   end
 
   def increment_progress
@@ -218,7 +230,11 @@ class MetasploitModule < Msf::Auxiliary
           use_ssl: true,
           verify_mode: OpenSSL::SSL::VERIFY_NONE,
           read_timeout: timeout
-        ) { |http| http.get('/') }
+        ) do |http|
+          req = Net::HTTP::Get.new('/')
+          req['User-Agent'] = datastore['USER_AGENT']
+          http.request(req)
+        end
 
         reached_https = true
         https_supported = true
@@ -241,7 +257,11 @@ class MetasploitModule < Msf::Auxiliary
           uri.host,
           uri.port,
           read_timeout: timeout
-        ) { |http| http.get('/') }
+        ) do |http|
+          req = Net::HTTP::Get.new('/')
+          req['User-Agent'] = datastore['USER_AGENT']
+          http.request(req)
+        end
 
         reached_http = true
         http_status = res.code
@@ -319,6 +339,56 @@ class MetasploitModule < Msf::Auxiliary
       filename,
       "HTTPS Scan #{safe_domain}"
     )
+  end
+
+
+  def export_results
+    @mutex.synchronize do
+      return if @results.empty?
+    end
+
+    export_path = datastore['EXPORT_PATH']
+    FileUtils.mkdir_p(export_path)
+
+    timestamp = Time.now.strftime('%Y%m%d_%H%M%S')
+
+    if datastore['EXPORT_JSON']
+      json_file = File.join(export_path, "scan_results_#{timestamp}.json")
+
+      File.open(json_file, 'w') do |f|
+        f.write(JSON.pretty_generate(@results))
+      end
+
+      print_good("JSON results saved to #{json_file}")
+    end
+
+    if datastore['EXPORT_CSV']
+      csv_file = File.join(export_path, "scan_results_#{timestamp}.csv")
+
+      CSV.open(csv_file, 'w') do |csv|
+        csv << [
+          "Domain",
+          "HTTPS Supported",
+          "HTTP Redirect to HTTPS",
+          "TLS Version",
+          "HTTP Status",
+          "HTTPS Status"
+        ]
+
+        @results.each do |r|
+          csv << [
+            r[:domain],
+            r[:https],
+            r[:http_redirect],
+            r[:tls],
+            r[:http_status],
+            r[:https_status]
+          ]
+        end
+      end
+
+      print_good("CSV results saved to #{csv_file}")
+    end
   end
 
   def log_result(logfile, result)
