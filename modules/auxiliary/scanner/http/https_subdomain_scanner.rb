@@ -204,7 +204,36 @@ class MetasploitModule < Msf::Auxiliary
     end
   end
 
+
+
+  def analyze_security_headers(headers)
+    checks = {
+      "strict-transport-security" => "HSTS",
+      "content-security-policy" => "CSP",
+      "x-frame-options" => "X-Frame-Options",
+      "x-content-type-options" => "X-Content-Type-Options",
+      "referrer-policy" => "Referrer-Policy",
+      "permissions-policy" => "Permissions-Policy"
+    }
+
+    results = {}
+
+    checks.each do |header, name|
+      if headers[header]
+        results[name] = "present"
+      else
+        results[name] = "missing"
+      end
+    end
+
+    results
+  end
+
   def check_https_status(domain, timeout, retry_count, http_port, https_port)
+    http_headers = {}
+    https_headers = {}
+    security_headers = {}
+    
     http_url  = "http://#{domain}:#{http_port}"
     https_url = "https://#{domain}:#{https_port}"
 
@@ -239,7 +268,9 @@ class MetasploitModule < Msf::Auxiliary
         reached_https = true
         https_supported = true
         https_status = res.code
+        https_headers = res.to_hash
         tls_version = get_tls_version(domain, https_port)
+        security_headers = analyze_security_headers(https_headers)
 
       rescue
         sleep(0.2)
@@ -265,6 +296,7 @@ class MetasploitModule < Msf::Auxiliary
 
         reached_http = true
         http_status = res.code
+        http_headers = res.to_hash
 
         if res.is_a?(Net::HTTPRedirection)
           location = res['location']
@@ -299,6 +331,17 @@ class MetasploitModule < Msf::Auxiliary
       end
 
       print_good("TLS version: #{tls_version}") if tls_version
+      if security_headers.any?
+        print_status("Security Header Analysis:")
+
+        security_headers.each do |name, status|
+          if status == "present"
+            print_good("#{name} present")
+          else
+            print_warning("#{name} missing")
+          end
+        end
+      end
     end
 
     {
@@ -307,7 +350,8 @@ class MetasploitModule < Msf::Auxiliary
       http_redirect: http_redirects_to_https,
       tls: tls_version,
       http_status: http_status,
-      https_status: https_status
+      https_status: https_status,
+      security_headers: security_headers
     }
   end
 
@@ -372,7 +416,13 @@ class MetasploitModule < Msf::Auxiliary
           "HTTP Redirect to HTTPS",
           "TLS Version",
           "HTTP Status",
-          "HTTPS Status"
+          "HTTPS Status",
+          "HSTS",
+          "CSP",
+          "X-Frame-Options",
+          "X-Content-Type-Options",
+          "Referrer-Policy",
+          "Permissions-Policy"
         ]
 
         @results.each do |r|
@@ -382,7 +432,13 @@ class MetasploitModule < Msf::Auxiliary
             r[:http_redirect],
             r[:tls],
             r[:http_status],
-            r[:https_status]
+            r[:https_status],
+            r[:security_headers]["HSTS"],
+            r[:security_headers]["CSP"],
+            r[:security_headers]["X-Frame-Options"],
+            r[:security_headers]["X-Content-Type-Options"],
+            r[:security_headers]["Referrer-Policy"],
+            r[:security_headers]["Permissions-Policy"]
           ]
         end
       end
