@@ -24,8 +24,8 @@ class MetasploitModule < Msf::Auxiliary
         HTTP redirects, TLS version, and HTTP response status codes.
 
         - Multithreaded scanning
-        - Stores results as Metasploit loot
-        - Optional custom logfile
+        - Export results to CSV or JSON
+        - Stores results in the Metasploit Loot database
         - Optional failed request output for speed testing
         - HTTP/HTTPS response status detection
       },
@@ -41,18 +41,13 @@ class MetasploitModule < Msf::Auxiliary
         OptInt.new('RETRY_COUNT', [true, 'Number of retries per request', 1]),
         OptInt.new('HTTP_PORT', [true, 'HTTP port', 80]),
         OptInt.new('HTTPS_PORT', [true, 'HTTPS port', 443]),
-
         OptString.new('USER_AGENT', [true, 'Custom HTTP User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36']),
         OptBool.new('EXPORT_JSON', [false, 'Export results to JSON', false]),
         OptBool.new('EXPORT_CSV', [false, 'Export results to CSV', false]),
         OptPath.new('EXPORT_PATH', [false, 'Directory to store exported scan results', './msf_scans']),
-
         OptPath.new('SUBDOMAIN_FILE', [false, 'Subdomain wordlist',
           File.join(Msf::Config.install_root, 'data', 'subdomains', 'common.txt')
         ]),
-
-        OptString.new('LOGFILE', [false, 'Optional log file (created if missing)']),
-
         OptBool.new('SHOW_FAILED',
           [false, 'Show domains that return no response (for speed testing)', false]
         )
@@ -64,7 +59,6 @@ class MetasploitModule < Msf::Auxiliary
     base_domain = datastore['DOMAIN']
     sub_file    = datastore['SUBDOMAIN_FILE']
     timeout     = datastore['TIMEOUT']
-    logfile     = datastore['LOGFILE']
     threads     = datastore['THREADS'] || 10
     show_failed = datastore['SHOW_FAILED']
 
@@ -80,11 +74,6 @@ class MetasploitModule < Msf::Auxiliary
     trap('INT') do
       print_warning('Stopping scan... please wait.')
       @stop_requested = true
-    end
-
-    if logfile
-      FileUtils.mkdir_p(File.dirname(logfile)) rescue nil
-      ::File.open(logfile, 'a') {}
     end
 
     subdomains = []
@@ -136,7 +125,6 @@ class MetasploitModule < Msf::Auxiliary
 
           @mutex.synchronize do
             store_loot_result(result)
-            log_result(logfile, result) if logfile
             @results << result
           end
 
@@ -444,29 +432,6 @@ class MetasploitModule < Msf::Auxiliary
       end
 
       print_good("CSV results saved to #{csv_file}")
-    end
-  end
-
-  def log_result(logfile, result)
-    timestamp = Time.now.strftime('%Y-%m-%d_%H-%M-%S')
-
-    base = ::File.basename(logfile, '.*')
-    ext  = ::File.extname(logfile)
-
-    logfile_with_time = ::File.join(
-      ::File.dirname(logfile),
-      "#{base}_#{timestamp}#{ext}"
-    )
-
-    ::File.open(logfile_with_time, 'a') do |f|
-      f.puts(
-        "[#{timestamp}] #{result[:domain]} | " \
-        "HTTP=#{result[:http_status] || 'N/A'} | " \
-        "HTTPS=#{result[:https_status] || 'N/A'} | " \
-        "HTTPS_SUPPORTED=#{result[:https]} | " \
-        "HTTP->HTTPS=#{result[:http_redirect]} | " \
-        "TLS=#{result[:tls] || 'N/A'}"
-      )
     end
   end
 end
