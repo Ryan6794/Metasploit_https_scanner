@@ -68,6 +68,7 @@ class MetasploitModule < Msf::Auxiliary
 
     @mutex = Mutex.new
     @stop_requested = false
+    @wildcard_ips = detect_wildcard(base_domain)
 
     @results = []
 
@@ -141,11 +142,45 @@ class MetasploitModule < Msf::Auxiliary
     
   end
 
+
+  def detect_wildcard(domain)
+    random_sub = "#{Rex::Text.rand_text_alpha(12)}.#{domain}"
+
+    begin
+      ips = Addrinfo.getaddrinfo(random_sub, nil).map { |a| a.ip_address }.uniq
+
+      if ips.any?
+        print_warning("Wildcard DNS detected for #{domain} -> #{ips.join(', ')}")
+        return ips
+      end
+    rescue
+      # No wildcard
+    end
+
+    print_status("No wildcard DNS detected for #{domain}")
+    []
+  end
+
   def increment_progress
     @mutex.synchronize do
       @processed += 1
       update_progress_bar
     end
+  end
+
+
+  def extract_title(body)
+    return nil unless body
+
+    match = body.match(/<title[^>]*>(.*?)<\/title>/im)
+    return nil unless match
+
+    title = match[1].strip
+
+    # Clean whitespace
+    title.gsub(/\s+/, ' ')
+  rescue
+    nil
   end
 
   def update_progress_bar
@@ -164,7 +199,17 @@ class MetasploitModule < Msf::Auxiliary
   end
 
   def resolves?(host)
-    Addrinfo.getaddrinfo(host, nil)
+    ips = Addrinfo.getaddrinfo(host, nil).map { |a| a.ip_address }.uniq
+
+    return false if ips.empty?
+
+    # Filter wildcard DNS matches
+    if @wildcard_ips && !@wildcard_ips.empty?
+      if (ips & @wildcard_ips).any?
+        return false
+      end
+    end
+
     true
   rescue
     false
@@ -192,6 +237,58 @@ class MetasploitModule < Msf::Auxiliary
     end
   end
 
+
+
+  def get_certificate_info(host, port)
+    tcp = nil
+    ssl = nil
+
+    begin
+      ctx = OpenSSL::SSL::SSLContext.new
+      tcp = Socket.tcp(host, port, connect_timeout: 5)
+
+      ssl = OpenSSL::SSL::SSLSocket.new(tcp, ctx)
+      ssl.hostname = host
+      ssl.sync_close = true
+      ssl.connect
+
+      cert = ssl.peer_cert
+
+      subject = cert.subject.to_s
+      issuer = cert.issuer.to_s
+      not_before = cert.not_before
+      not_after = cert.not_after
+
+      days_remaining = ((not_after - Time.now) / 86400).to_i
+
+      # Self-signed check
+      self_signed = (cert.issuer.to_s == cert.subject.to_s)
+
+      # Extract SANs
+      san = []
+      ext = cert.extensions.find { |e| e.oid == "subjectAltName" }
+      if ext
+        san = ext.value.split(",").map { |x| x.strip.gsub("DNS:", "") }
+      end
+
+      {
+        subject: subject,
+        issuer: issuer,
+        valid_from: not_before,
+        valid_to: not_after,
+        days_remaining: days_remaining,
+        expired: Time.now > not_after,
+        self_signed: self_signed,
+        san: san
+      }
+
+    rescue
+      nil
+    ensure
+      ssl&.close
+      tcp&.close
+    end
+  end
 
 
   def analyze_security_headers(headers)
@@ -230,9 +327,10 @@ class MetasploitModule < Msf::Auxiliary
     https_supported = false
     http_redirects_to_https = false
     tls_version = nil
-
+    cert_info = nil
     http_status = nil
     https_status = nil
+    title = nil
 
     # HTTPS CHECK
     retry_count.times do
@@ -250,15 +348,23 @@ class MetasploitModule < Msf::Auxiliary
         ) do |http|
           req = Net::HTTP::Get.new('/')
           req['User-Agent'] = datastore['USER_AGENT']
-          http.request(req)
+          http.request(req) do |res|
+            res.read_body do |chunk|
+              @body ||= ""
+              @body << chunk
+              break if @body.length > 10_000
+            end
+          end
         end
 
         reached_https = true
         https_supported = true
         https_status = res.code
         https_headers = res.to_hash
+        title = extract_title(res.body)
         tls_version = get_tls_version(domain, https_port)
         security_headers = analyze_security_headers(https_headers)
+        cert_info = get_certificate_info(domain, https_port)
 
       rescue
         sleep(0.2)
@@ -285,6 +391,7 @@ class MetasploitModule < Msf::Auxiliary
         reached_http = true
         http_status = res.code
         http_headers = res.to_hash
+        title ||= extract_title(res.body)
 
         if res.is_a?(Net::HTTPRedirection)
           location = res['location']
@@ -318,6 +425,8 @@ class MetasploitModule < Msf::Auxiliary
         end
       end
 
+      print_good("Title: #{title}") if title
+
       print_good("TLS version: #{tls_version}") if tls_version
       if security_headers.any?
         print_status("Security Header Analysis:")
@@ -330,16 +439,41 @@ class MetasploitModule < Msf::Auxiliary
           end
         end
       end
+
+      if cert_info
+        print_status("Certificate Info:")
+        print_good("Subject: #{cert_info[:subject]}")
+        print_good("Issuer: #{cert_info[:issuer]}")
+        print_status("Valid From: #{cert_info[:valid_from]}")
+        print_status("Valid To: #{cert_info[:valid_to]}")
+        print_status("Days Remaining: #{cert_info[:days_remaining]}")
+
+        if cert_info[:expired]
+          print_error("Certificate EXPIRED")
+        end
+
+        if cert_info[:self_signed]
+          print_warning("Self-signed certificate")
+        end
+
+        unless cert_info[:san].empty?
+          print_status("SANs: #{cert_info[:san].join(', ')}")
+        end
+      end
+
+
     end
 
     {
       domain: domain,
+      title: title,
       https: https_supported,
       http_redirect: http_redirects_to_https,
       tls: tls_version,
       http_status: http_status,
       https_status: https_status,
-      security_headers: security_headers
+      security_headers: security_headers,
+      certificate: cert_info
     }
   end
 
@@ -400,6 +534,7 @@ class MetasploitModule < Msf::Auxiliary
       CSV.open(csv_file, 'w') do |csv|
         csv << [
           "Domain",
+          "Title",
           "HTTPS Supported",
           "HTTP Redirect to HTTPS",
           "TLS Version",
@@ -410,12 +545,17 @@ class MetasploitModule < Msf::Auxiliary
           "X-Frame-Options",
           "X-Content-Type-Options",
           "Referrer-Policy",
-          "Permissions-Policy"
+          "Permissions-Policy",
+          "Cert Issuer",
+          "Cert Expiry",
+          "Days Remaining",
+          "Self Signed"
         ]
 
         @results.each do |r|
           csv << [
             r[:domain],
+            r[:title],
             r[:https],
             r[:http_redirect],
             r[:tls],
@@ -426,7 +566,11 @@ class MetasploitModule < Msf::Auxiliary
             r[:security_headers]["X-Frame-Options"],
             r[:security_headers]["X-Content-Type-Options"],
             r[:security_headers]["Referrer-Policy"],
-            r[:security_headers]["Permissions-Policy"]
+            r[:security_headers]["Permissions-Policy"],
+            r[:certificate]&.dig(:issuer),
+            r[:certificate]&.dig(:valid_to),
+            r[:certificate]&.dig(:days_remaining),
+            r[:certificate]&.dig(:self_signed)
           ]
         end
       end
