@@ -61,16 +61,16 @@ class MetasploitModule < Msf::Auxiliary
     timeout     = datastore['TIMEOUT']
     threads     = datastore['THREADS'] || 10
     show_failed = datastore['SHOW_FAILED']
-
-    retry_count = datastore['RETRY_COUNT'] || 1
     http_port   = datastore['HTTP_PORT'] || 80
     https_port  = datastore['HTTPS_PORT'] || 443
 
     @mutex = Mutex.new
+    @http_pool_mutex = Mutex.new
     @stop_requested = false
     @wildcard_ips = detect_wildcard(base_domain)
 
     @results = []
+    @http_pool = {}
 
     trap('INT') do
       print_warning('Stopping scan... please wait.')
@@ -101,10 +101,14 @@ class MetasploitModule < Msf::Auxiliary
 
     threads.times do
       workers << Thread.new do
-        while !queue.empty? && !@stop_requested
-          domain = queue.pop(true) rescue nil
-          next unless domain
+        loop do
           break if @stop_requested
+
+          begin
+            domain = queue.pop(true)
+          rescue ThreadError
+            break
+          end
 
           unless resolves?(domain)
             if show_failed
@@ -114,7 +118,7 @@ class MetasploitModule < Msf::Auxiliary
             next
           end
 
-          result = check_https_status(domain, timeout, retry_count, http_port, https_port)
+          result = check_https_status(domain, timeout, http_port, https_port)
 
           unless result
             if show_failed
@@ -139,7 +143,7 @@ class MetasploitModule < Msf::Auxiliary
     export_results
     print_line("")
     print_status('Scan completed.')
-    
+    cleanup_http_pool
   end
 
 
@@ -238,6 +242,35 @@ class MetasploitModule < Msf::Auxiliary
   end
 
 
+  def get_http_client(host, port, use_ssl, timeout)
+    key = "#{host}:#{port}:#{use_ssl}:#{Thread.current.object_id}"
+
+    # Fast path (no lock)
+    client = @http_pool[key]
+    return client if client&.active?
+
+    @http_pool_mutex.synchronize do
+      client = @http_pool[key]
+      return client if client&.active?
+
+      http = Net::HTTP.new(host, port)
+      http.read_timeout = timeout 
+      http.open_timeout = timeout
+
+      if use_ssl
+        http.use_ssl = true
+        http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+      end
+
+      http.start
+      @http_pool[key] = http
+      http
+    end
+  rescue
+    nil
+  end
+
+
 
   def get_certificate_info(host, port)
     tcp = nil
@@ -314,14 +347,61 @@ class MetasploitModule < Msf::Auxiliary
     results
   end
 
-  def check_https_status(domain, timeout, retry_count, http_port, https_port)
-    http_headers = {}
-    https_headers = {}
-    security_headers = {}
-    
-    http_url  = "http://#{domain}:#{http_port}"
-    https_url = "https://#{domain}:#{https_port}"
 
+  def make_request(host, port, use_ssl, timeout)
+    retries = datastore['RETRY_COUNT'] || 1
+    key = "#{host}:#{port}:#{use_ssl}:#{Thread.current.object_id}"
+
+    retries.times do |attempt|
+      http = get_http_client(host, port, use_ssl, timeout)
+      return nil unless http
+
+      req = Net::HTTP::Get.new('/')
+      req['User-Agent'] = datastore['USER_AGENT']
+
+      response = nil
+      body = ""
+
+      begin
+        http.request(req) do |res|
+          response = res
+
+          res.read_body do |chunk|
+            body << chunk
+            break if body.length > 10_000
+          end
+        end
+
+        return {
+          code: response.code,
+          headers: response.to_hash,
+          body: body,
+          redirect: response.is_a?(Net::HTTPRedirection) ? response['location'] : nil
+        }
+
+      rescue
+        # Kill bad connection so next retry creates a fresh one
+        @http_pool_mutex.synchronize do
+          if @http_pool[key]
+            begin
+              @http_pool[key].finish if @http_pool[key].active?
+            rescue
+            end
+            @http_pool.delete(key)
+          end
+        end
+
+        sleep(0.2) if attempt < retries - 1
+      end
+    end
+
+    nil
+  end
+
+  def check_https_status(domain, timeout, http_port, https_port)
+    https_security_headers = {}
+    http_security_headers = {}
+    
     reached_https = false
     reached_http  = false
     https_supported = false
@@ -333,73 +413,32 @@ class MetasploitModule < Msf::Auxiliary
     title = nil
 
     # HTTPS CHECK
-    retry_count.times do
-      break if reached_https
+    res = make_request(domain, https_port, true, timeout)
 
-      begin
-        uri = URI.parse(https_url)
-
-        res = Net::HTTP.start(
-          uri.host,
-          uri.port,
-          use_ssl: true,
-          verify_mode: OpenSSL::SSL::VERIFY_NONE,
-          read_timeout: timeout
-        ) do |http|
-          req = Net::HTTP::Get.new('/')
-          req['User-Agent'] = datastore['USER_AGENT']
-          http.request(req) do |res|
-            res.read_body do |chunk|
-              @body ||= ""
-              @body << chunk
-              break if @body.length > 10_000
-            end
-          end
-        end
-
-        reached_https = true
-        https_supported = true
-        https_status = res.code
-        https_headers = res.to_hash
-        title = extract_title(res.body)
-        tls_version = get_tls_version(domain, https_port)
-        security_headers = analyze_security_headers(https_headers)
-        cert_info = get_certificate_info(domain, https_port)
-
-      rescue
-        sleep(0.2)
-      end
+    if res
+      reached_https = true
+      https_supported = true 
+      https_status = res[:code]
+      https_headers = res[:headers]
+      title = extract_title(res[:body])
+      tls_version = get_tls_version(domain, https_port)
+      https_security_headers = analyze_security_headers(https_headers)
+      cert_info = get_certificate_info(domain, https_port)
     end
 
     # HTTP CHECK
-    retry_count.times do
-      break if reached_http
+    http_security_headers = {}
+    res = make_request(domain, http_port, false, timeout)
 
-      begin
-        uri = URI.parse(http_url)
+    if res
+      reached_http = true
+      http_status = res[:code]
+      http_headers = res[:headers]
+      title ||= extract_title(res[:body])
+      http_security_headers = analyze_security_headers(http_headers)
 
-        res = Net::HTTP.start(
-          uri.host,
-          uri.port,
-          read_timeout: timeout
-        ) do |http|
-          req = Net::HTTP::Get.new('/')
-          req['User-Agent'] = datastore['USER_AGENT']
-          http.request(req)
-        end
-
-        reached_http = true
-        http_status = res.code
-        http_headers = res.to_hash
-        title ||= extract_title(res.body)
-
-        if res.is_a?(Net::HTTPRedirection)
-          location = res['location']
-          http_redirects_to_https = location&.start_with?('https://')
-        end
-
-      rescue
-        sleep(0.2)
+      if res[:redirect]
+        http_redirects_to_https = res[:redirect].start_with?('https://')
       end
     end
 
@@ -440,6 +479,18 @@ class MetasploitModule < Msf::Auxiliary
         end
       end
 
+      if http_security_headers && !http_security_headers.empty?
+        print_status("HTTP Security Header Analysis:")
+
+        http_security_headers.each do |name, status|
+          if status == "present"
+            print_good("HTTP #{name} present")
+          else
+            print_warning("HTTP #{name} missing")
+          end
+        end
+      end
+
       if cert_info
         print_status("Certificate Info:")
         print_good("Subject: #{cert_info[:subject]}")
@@ -472,9 +523,22 @@ class MetasploitModule < Msf::Auxiliary
       tls: tls_version,
       http_status: http_status,
       https_status: https_status,
-      security_headers: security_headers,
+      security_headers_https: https_security_headers,
+      security_headers_http: http_security_headers,
       certificate: cert_info
     }
+  end
+
+  def cleanup_http_pool
+    @http_pool_mutex.synchronize do
+      @http_pool.each_value do |http|
+        begin
+          http.finish if http&.active?
+        rescue
+        end
+      end
+      @http_pool.clear
+    end
   end
 
   def store_loot_result(result)
@@ -540,12 +604,18 @@ class MetasploitModule < Msf::Auxiliary
           "TLS Version",
           "HTTP Status",
           "HTTPS Status",
-          "HSTS",
-          "CSP",
-          "X-Frame-Options",
-          "X-Content-Type-Options",
-          "Referrer-Policy",
-          "Permissions-Policy",
+          "HTTPS HSTS",
+          "HTTPS CSP",
+          "HTTPS X-Frame-Options",
+          "HTTPS X-Content-Type-Options",
+          "HTTPS Referrer-Policy",
+          "HTTPS Permissions-Policy",
+          "HTTP HSTS",
+          "HTTP CSP",
+          "HTTP X-Frame-Options",
+          "HTTP X-Content-Type-Options",
+          "HTTP Referrer-Policy",
+          "HTTP Permissions-Policy",
           "Cert Issuer",
           "Cert Expiry",
           "Days Remaining",
@@ -561,12 +631,18 @@ class MetasploitModule < Msf::Auxiliary
             r[:tls],
             r[:http_status],
             r[:https_status],
-            r[:security_headers]["HSTS"],
-            r[:security_headers]["CSP"],
-            r[:security_headers]["X-Frame-Options"],
-            r[:security_headers]["X-Content-Type-Options"],
-            r[:security_headers]["Referrer-Policy"],
-            r[:security_headers]["Permissions-Policy"],
+            r[:security_headers_https]["HSTS"],
+            r[:security_headers_https]["CSP"],
+            r[:security_headers_https]["X-Frame-Options"],
+            r[:security_headers_https]["X-Content-Type-Options"],
+            r[:security_headers_https]["Referrer-Policy"],
+            r[:security_headers_https]["Permissions-Policy"],
+            r[:security_headers_http]&.[]("HSTS"),
+            r[:security_headers_http]&.[]("CSP"),
+            r[:security_headers_http]&.[]("X-Frame-Options"),
+            r[:security_headers_http]&.[]("X-Content-Type-Options"),
+            r[:security_headers_http]&.[]("Referrer-Policy"),
+            r[:security_headers_http]&.[]("Permissions-Policy"),
             r[:certificate]&.dig(:issuer),
             r[:certificate]&.dig(:valid_to),
             r[:certificate]&.dig(:days_remaining),
