@@ -401,7 +401,7 @@ class MetasploitModule < Msf::Auxiliary
   def check_https_status(domain, timeout, http_port, https_port)
     https_security_headers = {}
     http_security_headers = {}
-    
+
     reached_https = false
     reached_http  = false
     https_supported = false
@@ -467,10 +467,10 @@ class MetasploitModule < Msf::Auxiliary
       print_good("Title: #{title}") if title
 
       print_good("TLS version: #{tls_version}") if tls_version
-      if security_headers.any?
-        print_status("Security Header Analysis:")
+      if https_security_headers.any?
+        print_status("HTTPS Security Header Analysis:")
 
-        security_headers.each do |name, status|
+        https_security_headers.each do |name, status|
           if status == "present"
             print_good("#{name} present")
           else
