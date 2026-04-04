@@ -44,7 +44,7 @@ class MetasploitModule < Msf::Auxiliary
         OptString.new('USER_AGENT', [true, 'Custom HTTP User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36']),
         OptBool.new('EXPORT_JSON', [false, 'Export results to JSON', false]),
         OptBool.new('EXPORT_CSV', [false, 'Export results to CSV', false]),
-        OptPath.new('EXPORT_PATH', [false, 'Directory to store exported scan results', './msf_scans']),
+        OptPath.new('EXPORT_PATH', [false, 'Directory to store exported scan results', '~/Downloads']),
         OptPath.new('SUBDOMAIN_FILE', [false, 'Subdomain wordlist',
           File.join(Msf::Config.install_root, 'data', 'subdomains', 'common.txt')
         ]),
@@ -219,27 +219,27 @@ class MetasploitModule < Msf::Auxiliary
     false
   end
 
-  def get_tls_version(host, port)
-    tcp = nil
-    ssl = nil
+  # def get_tls_version(host, port)
+  #   tcp = nil
+  #   ssl = nil
 
-    begin
-      ctx = OpenSSL::SSL::SSLContext.new
-      tcp = Socket.tcp(host, port, connect_timeout: 5)
+  #   begin
+  #     ctx = OpenSSL::SSL::SSLContext.new
+  #     tcp = Socket.tcp(host, port, connect_timeout: 5)
 
-      ssl = OpenSSL::SSL::SSLSocket.new(tcp, ctx)
-      ssl.hostname = host
-      ssl.sync_close = true
+  #     ssl = OpenSSL::SSL::SSLSocket.new(tcp, ctx)
+  #     ssl.hostname = host
+  #     ssl.sync_close = true
 
-      ssl.connect
-      ssl.ssl_version
-    rescue
-      nil
-    ensure
-      ssl&.close
-      tcp&.close
-    end
-  end
+  #     ssl.connect
+  #     ssl.ssl_version
+  #   rescue
+  #     nil
+  #   ensure
+  #     ssl&.close
+  #     tcp&.close
+  #   end
+  # end
 
 
   def get_http_client(host, port, use_ssl, timeout)
@@ -272,20 +272,70 @@ class MetasploitModule < Msf::Auxiliary
 
 
 
-  def get_certificate_info(host, port)
-    tcp = nil
-    ssl = nil
+  # def get_certificate_info(host, port)
+  #   tcp = nil
+  #   ssl = nil
+
+  #   begin
+  #     ctx = OpenSSL::SSL::SSLContext.new
+  #     tcp = Socket.tcp(host, port, connect_timeout: 5)
+
+  #     ssl = OpenSSL::SSL::SSLSocket.new(tcp, ctx)
+  #     ssl.hostname = host
+  #     ssl.sync_close = true
+  #     ssl.connect
+
+  #     cert = ssl.peer_cert
+
+  #     subject = cert.subject.to_s
+  #     issuer = cert.issuer.to_s
+  #     not_before = cert.not_before
+  #     not_after = cert.not_after
+
+  #     days_remaining = ((not_after - Time.now) / 86400).to_i
+
+  #     # Self-signed check
+  #     self_signed = (cert.issuer.to_s == cert.subject.to_s)
+
+  #     # Extract SANs
+  #     san = []
+  #     ext = cert.extensions.find { |e| e.oid == "subjectAltName" }
+  #     if ext
+  #       san = ext.value.split(",").map { |x| x.strip.gsub("DNS:", "") }
+  #     end
+
+  #     {
+  #       subject: subject,
+  #       issuer: issuer,
+  #       valid_from: not_before,
+  #       valid_to: not_after,
+  #       days_remaining: days_remaining,
+  #       expired: Time.now > not_after,
+  #       self_signed: self_signed,
+  #       san: san
+  #     }
+
+  #   rescue
+  #     nil
+  #   ensure
+  #     ssl&.close
+  #     tcp&.close
+  #   end
+  # end
+
+
+
+  def extract_tls_and_cert(http)
+    return [nil, nil] unless http&.use_ssl?
 
     begin
-      ctx = OpenSSL::SSL::SSLContext.new
-      tcp = Socket.tcp(host, port, connect_timeout: 5)
+      ssl_socket = http.instance_variable_get(:@socket)&.io
+      return [nil, nil] unless ssl_socket
 
-      ssl = OpenSSL::SSL::SSLSocket.new(tcp, ctx)
-      ssl.hostname = host
-      ssl.sync_close = true
-      ssl.connect
+      tls_version = ssl_socket.ssl_version
 
-      cert = ssl.peer_cert
+      cert = ssl_socket.peer_cert
+      return [tls_version, nil] unless cert
 
       subject = cert.subject.to_s
       issuer = cert.issuer.to_s
@@ -293,18 +343,15 @@ class MetasploitModule < Msf::Auxiliary
       not_after = cert.not_after
 
       days_remaining = ((not_after - Time.now) / 86400).to_i
+      self_signed = (issuer == subject)
 
-      # Self-signed check
-      self_signed = (cert.issuer.to_s == cert.subject.to_s)
-
-      # Extract SANs
       san = []
       ext = cert.extensions.find { |e| e.oid == "subjectAltName" }
       if ext
         san = ext.value.split(",").map { |x| x.strip.gsub("DNS:", "") }
       end
 
-      {
+      cert_info = {
         subject: subject,
         issuer: issuer,
         valid_from: not_before,
@@ -315,16 +362,17 @@ class MetasploitModule < Msf::Auxiliary
         san: san
       }
 
+      [tls_version, cert_info]
+
     rescue
-      nil
-    ensure
-      ssl&.close
-      tcp&.close
+      [nil, nil]
     end
   end
 
 
   def analyze_security_headers(headers)
+    return nil unless headers 
+    
     checks = {
       "strict-transport-security" => "HSTS",
       "content-security-policy" => "CSP",
@@ -376,9 +424,9 @@ class MetasploitModule < Msf::Auxiliary
           code: response.code,
           headers: response.to_hash,
           body: body,
-          redirect: response.is_a?(Net::HTTPRedirection) ? response['location'] : nil
+          redirect: response.is_a?(Net::HTTPRedirection) ? response['location'] : nil,
+          http: http   # <-- ADD THIS
         }
-
       rescue
         # Kill bad connection so next retry creates a fresh one
         @http_pool_mutex.synchronize do
@@ -399,8 +447,8 @@ class MetasploitModule < Msf::Auxiliary
   end
 
   def check_https_status(domain, timeout, http_port, https_port)
-    https_security_headers = {}
-    http_security_headers = {}
+    https_security_headers = nil
+    http_security_headers = nil
 
     reached_https = false
     reached_http  = false
@@ -421,13 +469,13 @@ class MetasploitModule < Msf::Auxiliary
       https_status = res[:code]
       https_headers = res[:headers]
       title = extract_title(res[:body])
-      tls_version = get_tls_version(domain, https_port)
-      https_security_headers = analyze_security_headers(https_headers)
-      cert_info = get_certificate_info(domain, https_port)
+      tls_version, cert_info = extract_tls_and_cert(res[:http])
+    else
+      https_security_headers = "unreachable"
     end
 
     # HTTP CHECK
-    http_security_headers = {}
+    http_security_headers = nil
     res = make_request(domain, http_port, false, timeout)
 
     if res
@@ -440,6 +488,8 @@ class MetasploitModule < Msf::Auxiliary
       if res[:redirect]
         http_redirects_to_https = res[:redirect].start_with?('https://')
       end
+    else
+      http_security_headers = "unreachable" 
     end
 
     return nil unless reached_http || reached_https
@@ -467,7 +517,10 @@ class MetasploitModule < Msf::Auxiliary
       print_good("Title: #{title}") if title
 
       print_good("TLS version: #{tls_version}") if tls_version
-      if https_security_headers.any?
+      
+      if https_security_headers == "unreachable"
+        print_error("HTTPS headers could not be retrieved")
+      elsif https_security_headers
         print_status("HTTPS Security Header Analysis:")
 
         https_security_headers.each do |name, status|
@@ -631,18 +684,18 @@ class MetasploitModule < Msf::Auxiliary
             r[:tls],
             r[:http_status],
             r[:https_status],
-            r[:security_headers_https]["HSTS"],
-            r[:security_headers_https]["CSP"],
-            r[:security_headers_https]["X-Frame-Options"],
-            r[:security_headers_https]["X-Content-Type-Options"],
-            r[:security_headers_https]["Referrer-Policy"],
-            r[:security_headers_https]["Permissions-Policy"],
-            r[:security_headers_http]&.[]("HSTS"),
-            r[:security_headers_http]&.[]("CSP"),
-            r[:security_headers_http]&.[]("X-Frame-Options"),
-            r[:security_headers_http]&.[]("X-Content-Type-Options"),
-            r[:security_headers_http]&.[]("Referrer-Policy"),
-            r[:security_headers_http]&.[]("Permissions-Policy"),
+            r[:security_headers_https]&.[]("HSTS") || "unknown",
+            r[:security_headers_https]&.[]("CSP") || "unknown",
+            r[:security_headers_https]&.[]("X-Frame-Options") || "unknown",
+            r[:security_headers_https]&.[]("X-Content-Type-Options") || "unknown",
+            r[:security_headers_https]&.[]("Referrer-Policy") || "unknown",
+            r[:security_headers_https]&.[]("Permissions-Policy") || "unknown",
+            r[:security_headers_http]&.[]("HSTS") || "unknown",
+            r[:security_headers_http]&.[]("CSP") || "unknown",
+            r[:security_headers_http]&.[]("X-Frame-Options") || "unknown",
+            r[:security_headers_http]&.[]("X-Content-Type-Options") || "unknown",
+            r[:security_headers_http]&.[]("Referrer-Policy") || "unknown",
+            r[:security_headers_http]&.[]("Permissions-Policy") || "unknown",
             r[:certificate]&.dig(:issuer),
             r[:certificate]&.dig(:valid_to),
             r[:certificate]&.dig(:days_remaining),

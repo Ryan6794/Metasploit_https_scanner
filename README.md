@@ -1,113 +1,221 @@
-HTTP/HTTPS Subdomain Scanner (Metasploit Module)
-Overview
+# HTTP/HTTPS Subdomain Scanner (Metasploit Module)
 
-The HTTP/HTTPS Subdomain Scanner is a Metasploit auxiliary module designed to enumerate subdomains of a target domain and evaluate their web security posture.
-For each resolvable subdomain, the module checks:
+## Overview
 
-Whether HTTPS is supported
+The **HTTP/HTTPS Subdomain Scanner** is a custom auxiliary module for the Metasploit Framework designed to enumerate subdomains and assess their web security posture.
 
-Whether HTTP redirects to HTTPS
+It performs fast, multithreaded reconnaissance to identify:
 
-Which TLS version is negotiated (if HTTPS is available)
+* HTTPS availability
+* HTTP → HTTPS redirection behavior
+* TLS version in use
+* SSL/TLS certificate details
+* Security headers (HSTS, CSP, etc.)
+* HTTP/HTTPS response status codes
 
-This module is useful for reconnaissance, security assessments, and identifying misconfigurations such as plaintext HTTP access or outdated TLS versions.
+This module is useful for **reconnaissance, security assessments, and misconfiguration discovery**.
 
-Features
+---
 
-Subdomain enumeration using a wordlist
+## Features
 
-DNS resolution validation before scanning
+* Multithreaded subdomain scanning
+* DNS resolution validation (filters wildcard DNS)
+* HTTP and HTTPS endpoint analysis
+* HTTP → HTTPS redirection detection
+* TLS version extraction (no duplicate connections)
+* SSL/TLS certificate inspection:
 
-HTTPS availability detection
+  * Issuer
+  * Expiration
+  * SANs
+  * Self-signed detection
+* Security header analysis:
 
-HTTP to HTTPS redirection analysis
+  * HSTS
+  * CSP
+  * X-Frame-Options
+  * X-Content-Type-Options
+  * Referrer-Policy
+  * Permissions-Policy
+* Connection pooling for performance
+* Retry logic for unstable hosts
+* Export results to:
 
-TLS version identification
+  * JSON
+  * CSV
+* Stores results in Metasploit loot database
+* Optional display of failed/unreachable hosts
 
-Configurable network timeout
+---
 
-Graceful handling of unreachable or misconfigured hosts
+## Requirements
 
-Requirements
+* Metasploit Framework 6+
+* Ruby (included with Metasploit)
+* Network access to target domains
 
-Metasploit Framework 6+
+---
 
-Ruby (included with Metasploit)
+## Installation
 
-Network access to target domains
+Copy the module into your Metasploit modules directory:
 
-Tested with Metasploit Framework 6.x.
-
-Installation
-
-Copy the module into your Metasploit auxiliary modules directory:
-
+```bash
 cp https_subdomain_scanner.rb \
 ~/.msf4/modules/auxiliary/scanner/http/
+```
 
+Reload modules:
 
-Reload Metasploit modules:
-
+```bash
 msfconsole
 msf6 > reload_all
+```
 
-Usage
-Basic Example
+---
+
+## Usage
+
+### Basic Example
+
+```bash
 msf6 > use auxiliary/scanner/http/https_subdomain_scanner
 msf6 auxiliary(http_https_subdomain_scanner) > set DOMAIN example.com
 msf6 auxiliary(http_https_subdomain_scanner) > run
+```
 
-Using a Custom Subdomain Wordlist
-msf6 auxiliary(http_https_subdomain_scanner) > set SUBDOMAIN_FILE /path/to/subdomains.txt
+---
 
-Adjusting Timeout
-msf6 auxiliary(http_https_subdomain_scanner) > set TIMEOUT 10
+### Common Options
 
-Options
-Option	Required	Description	Default
-DOMAIN	Yes	Base domain to scan	example.com
-SUBDOMAIN_FILE	No	File containing subdomains (one per line)	common.txt
-TIMEOUT	Yes	Connection timeout (seconds)	5
+#### Use a Custom Wordlist
 
-If no subdomain file is provided, the module scans only the base domain.
+```bash
+set SUBDOMAIN_FILE /path/to/subdomains.txt
+```
 
-Output Details
+#### Increase Speed (More Threads)
+
+```bash
+set THREADS 20
+```
+
+#### Adjust Timeout
+
+```bash
+set TIMEOUT 10
+```
+
+#### Enable Output Export
+
+```bash
+set EXPORT_JSON true
+set EXPORT_CSV true
+set EXPORT_PATH ~/Downloads
+```
+
+#### Show Failed Hosts (Debug/Testing)
+
+```bash
+set SHOW_FAILED true
+```
+
+---
+
+## Module Options
+
+| Option         | Required | Description                  | Default     |
+| -------------- | -------- | ---------------------------- | ----------- |
+| DOMAIN         | Yes      | Base domain to scan          | example.com |
+| SUBDOMAIN_FILE | No       | Subdomain wordlist           | common.txt  |
+| THREADS        | Yes      | Number of concurrent threads | 10          |
+| TIMEOUT        | Yes      | Connection timeout (seconds) | 5           |
+| RETRY_COUNT    | Yes      | Request retries              | 1           |
+| HTTP_PORT      | Yes      | HTTP port                    | 80          |
+| HTTPS_PORT     | Yes      | HTTPS port                   | 443         |
+| USER_AGENT     | Yes      | Custom User-Agent            | Browser UA  |
+| EXPORT_JSON    | No       | Export JSON results          | false       |
+| EXPORT_CSV     | No       | Export CSV results           | false       |
+| EXPORT_PATH    | No       | Output directory             | ~/Downloads |
+| SHOW_FAILED    | No       | Show unreachable hosts       | false       |
+
+---
+
+## Output Details
 
 For each subdomain, the module reports:
 
-DNS resolution status
+* DNS resolution status
+* HTTP status code
+* HTTPS status code
+* HTTPS support (true/false)
+* HTTP → HTTPS redirect behavior
+* Page title (if available)
+* TLS version (reused from existing connection)
+* Security header presence (HTTP & HTTPS)
+* Certificate details:
 
-HTTPS reachability
+  * Issuer
+  * Validity dates
+  * Days remaining
+  * Self-signed status
+  * Subject Alternative Names (SANs)
 
-HTTP behavior (redirects, plaintext access, errors)
+---
 
-TLS version (if HTTPS is supported)
+## Example Findings
 
-A summary of findings per host
+This module helps quickly identify:
 
-This makes it easy to identify:
+* Subdomains without HTTPS
+* Sites exposing plaintext HTTP
+* Missing security headers
+* Expired or self-signed certificates
+* Weak or inconsistent TLS deployments
 
-Hosts lacking HTTPS
+---
 
-Hosts exposing HTTP without redirection
+## Performance Notes
 
-Inconsistent TLS deployments across subdomains
+* Uses **thread pooling** for high-speed scanning
+* Reuses HTTP connections to reduce overhead
+* Extracts TLS + certificate info from the same socket (no duplicate handshakes)
+* Handles unreliable hosts with retry logic
 
-Limitations
+---
 
-TLS certificates are not validated (VERIFY_NONE is used)
+## Limitations
 
-No cipher suite enumeration
+* SSL verification is disabled (`VERIFY_NONE`)
+* No cipher suite enumeration
+* No deep vulnerability scanning (recon only)
+* Dependent on wordlist quality for discovery
 
-No parallelization (runs sequentially)
+---
 
-Designed for reconnaissance, not exploitation
+## Legal Disclaimer
 
-Legal Disclaimer
+This module is intended for **authorized security testing and educational purposes only**.
 
-This module is intended for authorized security testing and educational purposes only.
-You are responsible for obtaining proper authorization before scanning any systems you do not own.
+You must have explicit permission before scanning any system you do not own.
 
-Author
+Unauthorized scanning may violate laws and regulations.
 
-Ryan Lyman
+---
+
+## Author
+
+**Ryan Lyman**
+
+---
+
+## Future Improvements
+
+* Cipher suite enumeration
+* HTTP/2 detection
+* Screenshot capture of web services
+* Integration with reporting dashboards
+* Passive subdomain enumeration sources
+
+---
