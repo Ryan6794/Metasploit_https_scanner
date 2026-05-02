@@ -26,24 +26,24 @@ This module is useful for **reconnaissance, security assessments, and misconfigu
 * TLS version extraction (no duplicate connections)
 * SSL/TLS certificate inspection:
 
-  * Issuer
-  * Expiration
-  * SANs
-  * Self-signed detection
+* Issuer
+* Expiration
+* SANs
+* Self-signed detection
 * Security header analysis:
 
-  * HSTS
-  * CSP
-  * X-Frame-Options
-  * X-Content-Type-Options
-  * Referrer-Policy
-  * Permissions-Policy
+* HSTS
+* CSP
+* X-Frame-Options
+* X-Content-Type-Options
+* Referrer-Policy
+* Permissions-Policy
 * Connection pooling for performance
 * Retry logic for unstable hosts
 * Export results to:
 
-  * JSON
-  * CSV
+* JSON
+* CSV
 * Stores results in Metasploit loot database
 * Optional display of failed/unreachable hosts
 
@@ -57,7 +57,16 @@ This module is useful for **reconnaissance, security assessments, and misconfigu
 
 ---
 
-## Installation
+
+## Quick Install
+
+```bash
+curl -sSL https://raw.githubusercontent.com/Ryan6794/Metasploit_https_scanner/main/install.sh | bash
+```
+
+---
+
+## Manual Installation
 
 Copy the module into your Metasploit modules directory:
 
