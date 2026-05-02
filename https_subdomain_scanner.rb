@@ -45,8 +45,12 @@ class MetasploitModule < Msf::Auxiliary
         OptBool.new('EXPORT_JSON', [false, 'Export results to JSON', false]),
         OptBool.new('EXPORT_CSV', [false, 'Export results to CSV', false]),
         OptPath.new('EXPORT_PATH', [false, 'Directory to store exported scan results', '~/Downloads']),
-        OptPath.new('SUBDOMAIN_FILE', [false, 'Subdomain wordlist',
-          File.join(Msf::Config.install_root, 'data', 'subdomains', 'common.txt')
+        OptPath.new('SUBDOMAIN_FILE', [
+        false,
+        'Subdomain wordlist',
+        File.exist?(File.join(Msf::Config.install_root, 'data', 'subdomains', 'common.txt')) ?
+        File.join(Msf::Config.install_root, 'data', 'subdomains', 'common.txt') :
+        File.expand_path('~/.msf4/data/subdomains/common.txt')
         ]),
         OptBool.new('SHOW_FAILED',
           [false, 'Show domains that return no response (for speed testing)', false]
@@ -58,6 +62,11 @@ class MetasploitModule < Msf::Auxiliary
   def run
     base_domain = datastore['DOMAIN']
     sub_file    = datastore['SUBDOMAIN_FILE']
+    unless sub_file && File.exist?(sub_file)
+      print_error("SUBDOMAIN_FILE not found: #{sub_file}")
+      print_status("Please install the wordlist or set SUBDOMAIN_FILE manually")
+      return
+    end
     timeout     = datastore['TIMEOUT']
     threads     = datastore['THREADS'] || 10
     show_failed = datastore['SHOW_FAILED']
