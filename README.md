@@ -66,6 +66,14 @@ curl -sSL https://raw.githubusercontent.com/Ryan6794/Metasploit_https_scanner/ma
 
 ---
 
+## Quick Uninstall
+
+```bash
+curl -sSL https://raw.githubusercontent.com/Ryan6794/Metasploit_https_scanner/main/uninstall.sh | bash
+```
+
+---
+
 ## Manual Installation
 
 Copy the module into your Metasploit modules directory:
